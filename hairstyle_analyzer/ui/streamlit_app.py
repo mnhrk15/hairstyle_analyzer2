@@ -17,6 +17,8 @@ from datetime import datetime
 import streamlit as st
 import pandas as pd
 from PIL import Image
+import io
+import base64
 
 # 環境変数の設定
 os.environ["PYTHONIOENCODING"] = "utf-8"
@@ -31,6 +33,8 @@ SESSION_PROGRESS = "progress"
 SESSION_USE_CACHE = "use_cache"
 SESSION_CONFIG = "config"
 SESSION_PROCESSING_STAGES = "processing_stages"  # 処理段階を追跡するための新しいセッションキー
+SESSION_TEMPLATE_CHOICES = "template_choices"  # テンプレート選択肢を保存するセッションキー
+SESSION_USER_SELECTIONS = "user_selections"  # ユーザーの選択を保存するセッションキー
 
 # モジュールのインポート
 from hairstyle_analyzer.data.config_manager import ConfigManager
@@ -63,37 +67,69 @@ from hairstyle_analyzer.utils.async_context import progress_tracker
 
 from hairstyle_analyzer.data.models import ProcessResult, StyleAnalysis, AttributeAnalysis, Template, StylistInfo, CouponInfo, StyleFeatures
 
+# モジュールレベルでエクスポート
+__all__ = [
+    'init_session_state',
+    'display_results',
+    'display_template_choices',
+    'display_progress',
+    'export_to_excel',
+    'export_to_text',
+    'download_excel',
+    'download_text',
+    'render_sidebar',
+    'check_app_status'
+]
+
+# セッション変数管理のためのヘルパー関数を追加
+def get_session_value(key, default_value=None):
+    """セッション変数から値を取得するヘルパー関数"""
+    return st.session_state.get(key, default_value)
+
+def set_session_value(key, value):
+    """セッション変数に値を設定するヘルパー関数"""
+    st.session_state[key] = value
+
+def has_session_key(key):
+    """セッション変数にキーが存在するか確認するヘルパー関数"""
+    return key in st.session_state
 
 def init_session_state():
     """セッションステートを初期化"""
     # セッション変数の初期化
-    if SESSION_PROCESSOR not in st.session_state:
-        st.session_state[SESSION_PROCESSOR] = None
-    if SESSION_RESULTS not in st.session_state:
-        st.session_state[SESSION_RESULTS] = []
-    if SESSION_PROGRESS not in st.session_state:
-        st.session_state[SESSION_PROGRESS] = {
+    if not has_session_key(SESSION_PROCESSOR):
+        set_session_value(SESSION_PROCESSOR, None)
+    if not has_session_key(SESSION_RESULTS):
+        set_session_value(SESSION_RESULTS, [])
+    if not has_session_key(SESSION_PROGRESS):
+        set_session_value(SESSION_PROGRESS, {
             "current": 0,
             "total": 0,
             "message": "",
             "start_time": None,
             "complete": False
-        }
-    if SESSION_STYLISTS not in st.session_state:
-        st.session_state[SESSION_STYLISTS] = []
-    if SESSION_COUPONS not in st.session_state:
-        st.session_state[SESSION_COUPONS] = []
-    if SESSION_USE_CACHE not in st.session_state:
-        st.session_state[SESSION_USE_CACHE] = False
+        })
+    if not has_session_key(SESSION_STYLISTS):
+        set_session_value(SESSION_STYLISTS, [])
+    if not has_session_key(SESSION_COUPONS):
+        set_session_value(SESSION_COUPONS, [])
+    if not has_session_key(SESSION_USE_CACHE):
+        set_session_value(SESSION_USE_CACHE, False)
+    # テンプレート選択肢の初期化
+    if not has_session_key(SESSION_TEMPLATE_CHOICES):
+        set_session_value(SESSION_TEMPLATE_CHOICES, {})
+    # ユーザー選択の初期化
+    if not has_session_key(SESSION_USER_SELECTIONS):
+        set_session_value(SESSION_USER_SELECTIONS, {})
     # APIキーのセッション変数初期化は削除
-    if SESSION_SALON_URL not in st.session_state:
-        st.session_state[SESSION_SALON_URL] = ""
+    if not has_session_key(SESSION_SALON_URL):
+        set_session_value(SESSION_SALON_URL, "")
 
 
 def update_progress(current, total, message="", stage_details=None):
     """進捗状況の更新"""
-    if SESSION_PROGRESS in st.session_state:
-        progress = st.session_state[SESSION_PROGRESS]
+    if has_session_key(SESSION_PROGRESS):
+        progress = get_session_value(SESSION_PROGRESS)
         progress["current"] = current
         progress["total"] = total
         progress["message"] = message
@@ -106,7 +142,7 @@ def update_progress(current, total, message="", stage_details=None):
         if current >= total and total > 0:
             progress["complete"] = True
         
-        st.session_state[SESSION_PROGRESS] = progress
+        set_session_value(SESSION_PROGRESS, progress)
 
 
 async def process_images(processor, image_paths, stylists=None, coupons=None, use_cache=False):
@@ -244,11 +280,11 @@ async def process_images(processor, image_paths, stylists=None, coupons=None, us
         logging.error(traceback.format_exc())
         
         # エラー情報を進捗詳細に追加
-        if SESSION_PROGRESS in st.session_state:
-            progress = st.session_state[SESSION_PROGRESS]
+        if has_session_key(SESSION_PROGRESS):
+            progress = get_session_value(SESSION_PROGRESS)
             progress["message"] = f"エラーが発生しました: {str(e)}"
             progress["stage_details"] = f"処理中にエラーが発生しました:\n{str(e)}"
-            st.session_state[SESSION_PROGRESS] = progress
+            set_session_value(SESSION_PROGRESS, progress)
         
         # UIの更新を確実にするための遅延
         await asyncio.sleep(0.1)
@@ -329,8 +365,8 @@ def create_processor(config_manager):
 
 def display_progress():
     """進捗状況の表示"""
-    if SESSION_PROGRESS in st.session_state:
-        progress = st.session_state[SESSION_PROGRESS]
+    if has_session_key(SESSION_PROGRESS):
+        progress = get_session_value(SESSION_PROGRESS)
         current = progress["current"]
         total = progress["total"]
         message = progress["message"]
@@ -435,223 +471,237 @@ def display_progress():
                 st.success(f"🎉 処理が完了しました: {current}/{total}画像")
 
 
-def display_results(results):
-    """処理結果を表示する関数"""
+def display_template_choices(results):
+    """テンプレート選択画面を表示する"""
     if not results:
+        st.warning("処理された画像データがありません。")
+        return
+    
+    # セッション状態の初期化 (必要な場合)
+    if not has_session_key(SESSION_TEMPLATE_CHOICES):
+        set_session_value(SESSION_TEMPLATE_CHOICES, {})
+    
+    if not has_session_key(SESSION_USER_SELECTIONS):
+        set_session_value(SESSION_USER_SELECTIONS, {})
+    
+    # 画像ごとのテンプレート選択肢を表示
+    st.header("テンプレートの選択")
+    st.markdown("各画像について、最適なテンプレートを選択してください。AIが選んだ最善のオプションが最初に表示されます。")
+    
+    # 画像ごとに選択肢を表示
+    for i, result in enumerate(results):
+        image_name = result.image_name
+        
+        # すでに選択肢がセッションに保存されていなければ追加
+        template_choices = get_session_value(SESSION_TEMPLATE_CHOICES, {})
+        
+        if image_name not in template_choices:
+            # 選択肢を作成: デフォルトと代替テンプレート
+            templates = [result.selected_template] + result.alternative_templates
+            # 辞書全体を更新せず、特定のキーだけを更新
+            template_choices[image_name] = templates
+            set_session_value(SESSION_TEMPLATE_CHOICES, template_choices)
+        
+        # 選択肢を取得
+        templates = get_session_value(SESSION_TEMPLATE_CHOICES)[image_name]
+        
+        # 画像ごとにエクスパンダーを表示
+        with st.expander(f"画像 {i+1}: {image_name}", expanded=(i==0)):
+            cols = st.columns([1, 2])
+            
+            with cols[0]:
+                # 画像を表示（可能な場合）
+                if hasattr(result, 'image_data') and result.image_data:
+                    try:
+                        st.image(result.image_data, caption=f"画像: {image_name}", use_column_width=True)
+                    except Exception as e:
+                        st.error(f"画像の表示中にエラーが発生しました: {str(e)}")
+                elif hasattr(result, 'image_path') and result.image_path:
+                    try:
+                        st.image(result.image_path, caption=f"画像: {image_name}", use_column_width=True)
+                    except Exception as e:
+                        st.error(f"画像ファイルの表示中にエラーが発生しました: {str(e)}")
+                else:
+                    st.info("画像データが利用できません")
+            
+            with cols[1]:
+                # 選択肢のタイトルをラジオボタン用に準備
+                template_titles = []
+                for j, template in enumerate(templates):
+                    prefix = "🌟 AIおすすめ: " if j == 0 else f"選択肢 {j}: "
+                    template_titles.append(f"{prefix}{template.title}")
+                
+                # ユーザー選択のデフォルト値を設定
+                user_selections = get_session_value(SESSION_USER_SELECTIONS, {})
+                default_idx = user_selections.get(image_name, 0)
+                
+                # テンプレート選択用のラジオボタン
+                selected_idx = st.radio(
+                    "テンプレートを選択してください",
+                    options=range(len(template_titles)),
+                    format_func=lambda i: template_titles[i],
+                    index=default_idx,
+                    key=f"template_radio_{image_name}"
+                )
+                
+                # 選択をセッションに保存
+                user_selections[image_name] = selected_idx
+                set_session_value(SESSION_USER_SELECTIONS, user_selections)
+                
+                # 選択されたテンプレート情報を表示
+                selected_template = templates[selected_idx]
+                st.markdown("### 選択されたテンプレート情報")
+                st.markdown(f"**カテゴリ:** {selected_template.category}")
+                st.markdown(f"**タイトル:** {selected_template.title}")
+                st.markdown(f"**メニュー:** {selected_template.menu}")
+                st.markdown(f"**コメント:**\n{selected_template.comment}")
+                if hasattr(selected_template, 'hashtag'):
+                    st.markdown(f"**ハッシュタグ:** {selected_template.hashtag}")
+    
+    # 確定ボタン
+    st.write("すべての選択内容に問題がなければ、確定ボタンを押してください。")
+    if st.button("テンプレート選択を確定する", type="primary"):
+        # ユーザー選択をもとに、各ResultのテンプレートをUpdated
+        for result in results:
+            image_name = result.image_name
+            if image_name in get_session_value(SESSION_USER_SELECTIONS):
+                selected_idx = get_session_value(SESSION_USER_SELECTIONS)[image_name]
+                templates = get_session_value(SESSION_TEMPLATE_CHOICES)[image_name]
+                if 0 <= selected_idx < len(templates):
+                    result.user_selected_template = templates[selected_idx]
+        
+        # 確定フラグをセット
+        set_session_value('confirm_template_selections', True)
+        
+        # 結果を更新
+        set_session_value(SESSION_RESULTS, results)
+        
+        st.success("テンプレート選択を確定しました!")
+        st.balloons()  # 視覚的な演出
+
+def convert_results_to_dataframe(results):
+    """処理結果をDataFrameに変換する"""
+    try:
+        data = []
+        for result in results:
+            # 画像ごとの情報を抽出
+            template = result.selected_template
+            row = {
+                "画像": result.image_name,
+                "カテゴリ": template.category if template else "未選択",
+                "スタイル": template.title if template else "未選択",
+                "メニュー": template.menu if template else "未設定",
+                "コメント": template.comment if template else "未設定",
+                "ハッシュタグ": template.hashtag if (template and hasattr(template, 'hashtag')) else "なし"
+            }
+            data.append(row)
+        
+        # DataFrameに変換
+        return pd.DataFrame(data)
+    except Exception as e:
+        logging.error(f"DataFrameへの変換中にエラーが発生しました: {e}")
+        st.error(f"データの変換中にエラーが発生しました: {str(e)}")
+        return pd.DataFrame()
+
+def display_summary_table(df):
+    """結果のサマリーテーブルを表示する"""
+    if not df.empty:
+        st.subheader("結果サマリー")
+        st.dataframe(df, use_container_width=True)
+    else:
+        st.warning("表示するデータがありません")
+
+def display_image_details(results):
+    """各画像の詳細情報を表示する"""
+    st.subheader("画像ごとの詳細")
+    
+    for i, result in enumerate(results):
+        with st.expander(f"画像 {i+1}: {result.image_name}", expanded=i == 0):
+            # 1行2列のレイアウト
+            col1, col2 = st.columns([1, 2])
+            
+            with col1:
+                # 画像を表示
+                if hasattr(result, 'image_data') and result.image_data is not None:
+                    try:
+                        # PILイメージをバイトストリームに変換
+                        img_byte_arr = io.BytesIO()
+                        result.image_data.save(img_byte_arr, format=result.image_data.format or 'JPEG')
+                        img_byte_arr.seek(0)
+                        
+                        # 画像を表示
+                        st.image(img_byte_arr, caption=result.image_name, use_column_width=True)
+                    except Exception as e:
+                        st.error(f"画像の表示中にエラーが発生しました: {str(e)}")
+                else:
+                    st.warning("画像データがありません")
+            
+            with col2:
+                # 選択されたテンプレート情報を表示
+                if result.user_selected_template:
+                    template = result.user_selected_template
+                    st.write("### 選択されたテンプレート")
+                    st.write(f"**カテゴリ:** {template.category}")
+                    st.write(f"**タイトル:** {template.title}")
+                    st.write(f"**メニュー:** {template.menu}")
+                    st.write(f"**コメント:** {template.comment}")
+                    # hashtag属性を使用する（模範データのhashtags属性参照をhashtag属性に修正）
+                    if hasattr(template, 'hashtag'):
+                        st.write(f"**ハッシュタグ:** {template.hashtag}")
+                elif result.selected_template:
+                    template = result.selected_template
+                    st.write("### AIが選択したテンプレート")
+                    st.write(f"**カテゴリ:** {template.category}")
+                    st.write(f"**タイトル:** {template.title}")
+                    st.write(f"**メニュー:** {template.menu}")
+                    st.write(f"**コメント:** {template.comment}")
+                    # hashtag属性を使用する
+                    if hasattr(template, 'hashtag'):
+                        st.write(f"**ハッシュタグ:** {template.hashtag}")
+                else:
+                    st.warning("テンプレートが選択されていません")
+
+def display_export_buttons():
+    """エクスポートボタンを表示する"""
+    st.subheader("結果のエクスポート")
+    
+    # 結果とプロセッサをセッションから取得
+    results = get_session_value(SESSION_RESULTS, [])
+    processor = get_session_value(SESSION_PROCESSOR, None)
+    
+    if not results or not processor:
+        st.warning("エクスポート可能なデータがありません。")
+        return
+    
+    # 2列のレイアウト
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Excelエクスポートボタン
+        generate_excel_download(processor, results, "エクスポート可能")
+    
+    with col2:
+        # テキストエクスポートボタン
+        generate_text_download(processor, results, "エクスポート可能")
+
+def display_results(results):
+    """処理結果を表示する（分割された関数を呼び出す）"""
+    if not results or len(results) == 0:
         st.warning("表示する結果がありません。")
         return
     
-    st.subheader("処理結果")
+    # 結果をDataFrameに変換
+    df = convert_results_to_dataframe(results)
     
-    # 結果データをDataFrameに変換
-    data = []
-    for result in results:
-        # 結果が辞書型かオブジェクト型か確認
-        try:
-            if isinstance(result, dict):
-                # 辞書型の場合
-                image_name = result.get('image_name', '不明')
-                
-                # style_analysisの取得
-                style_analysis = result.get('style_analysis', {})
-                if isinstance(style_analysis, dict):
-                    category = style_analysis.get('category', '')
-                else:
-                    category = getattr(style_analysis, 'category', '')
-                
-                # attribute_analysisの取得
-                attribute_analysis = result.get('attribute_analysis', {})
-                if isinstance(attribute_analysis, dict):
-                    sex = attribute_analysis.get('sex', '')
-                    length = attribute_analysis.get('length', '')
-                else:
-                    sex = getattr(attribute_analysis, 'sex', '')
-                    length = getattr(attribute_analysis, 'length', '')
-                
-                # selected_templateの取得
-                selected_template = result.get('selected_template', {})
-                if isinstance(selected_template, dict):
-                    title = selected_template.get('title', '')
-                    comment = selected_template.get('comment', '')
-                    menu = selected_template.get('menu', '')
-                    hashtag = selected_template.get('hashtag', '')
-                else:
-                    title = getattr(selected_template, 'title', '')
-                    comment = getattr(selected_template, 'comment', '')
-                    menu = getattr(selected_template, 'menu', '')
-                    hashtag = getattr(selected_template, 'hashtag', '')
-                
-                # selected_stylistの取得
-                selected_stylist = result.get('selected_stylist', {})
-                if isinstance(selected_stylist, dict):
-                    stylist_name = selected_stylist.get('name', '')
-                else:
-                    stylist_name = getattr(selected_stylist, 'name', '')
-                
-                # selected_couponの取得
-                selected_coupon = result.get('selected_coupon', {})
-                if isinstance(selected_coupon, dict):
-                    coupon_name = selected_coupon.get('name', '')
-                else:
-                    coupon_name = getattr(selected_coupon, 'name', '')
-            else:
-                # オブジェクト型の場合
-                image_name = getattr(result, 'image_name', '不明')
-                category = getattr(result.style_analysis, 'category', '')
-                sex = getattr(result.attribute_analysis, 'sex', '')
-                length = getattr(result.attribute_analysis, 'length', '')
-                title = getattr(result.selected_template, 'title', '')
-                comment = getattr(result.selected_template, 'comment', '')
-                menu = getattr(result.selected_template, 'menu', '')
-                hashtag = getattr(result.selected_template, 'hashtag', '')
-                stylist_name = getattr(result.selected_stylist, 'name', '')
-                coupon_name = getattr(result.selected_coupon, 'name', '')
-            
-            # データの追加 - Excelと同じ順序で表示
-            data.append({
-                "スタイリスト名": stylist_name,
-                "クーポン名": coupon_name,
-                "コメント": comment,
-                "スタイルタイトル": title,
-                "性別": sex,
-                "長さ": length,
-                "スタイルメニュー": menu,
-                "ハッシュタグ": hashtag,
-                "画像ファイル名": image_name
-            })
-        except Exception as e:
-            st.error(f"結果の処理中にエラーが発生しました: {str(e)}")
-            st.write(f"結果の形式: {type(result)}")
-            if isinstance(result, dict):
-                st.write(f"結果のキー: {list(result.keys())}")
+    # サマリーテーブルの表示
+    display_summary_table(df)
     
-    df = pd.DataFrame(data)
+    # 画像ごとの詳細表示
+    display_image_details(results)
     
-    # 概要データフレームを表示
-    st.write("### 結果概要")
-    st.dataframe(df)
-    
-    # 詳細情報をエクスパンダーで表示
-    st.write("### 詳細情報")
-    
-    # 各画像ごとにエクスパンダーを作成
-    for result in results:
-        # 画像名を取得
-        if isinstance(result, dict):
-            image_name = result.get('image_name', '不明')
-        else:
-            image_name = getattr(result, 'image_name', '不明')
-        
-        # エクスパンダーを作成（デフォルトで閉じた状態）
-        with st.expander(f"📷 {image_name}", expanded=False):
-            # 3列レイアウトで表示
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.write("#### 基本情報")
-                
-                # スタイル分析結果
-                if isinstance(result, dict):
-                    style_analysis = result.get('style_analysis', {})
-                    if isinstance(style_analysis, dict):
-                        category = style_analysis.get('category', '')
-                        features = style_analysis.get('features', {})
-                    else:
-                        category = getattr(style_analysis, 'category', '')
-                        features = getattr(style_analysis, 'features', None)
-                    
-                    # 属性分析結果
-                    attribute_analysis = result.get('attribute_analysis', {})
-                    if isinstance(attribute_analysis, dict):
-                        sex = attribute_analysis.get('sex', '')
-                        length = attribute_analysis.get('length', '')
-                    else:
-                        sex = getattr(attribute_analysis, 'sex', '')
-                        length = getattr(attribute_analysis, 'length', '')
-                else:
-                    category = getattr(result.style_analysis, 'category', '')
-                    features = getattr(result.style_analysis, 'features', None)
-                    sex = getattr(result.attribute_analysis, 'sex', '')
-                    length = getattr(result.attribute_analysis, 'length', '')
-                
-                st.write(f"**カテゴリ:** {category}")
-                st.write(f"**性別:** {sex}")
-                st.write(f"**長さ:** {length}")
-                
-                # 特徴の詳細表示
-                st.write("#### スタイル特徴")
-                if features:
-                    if isinstance(features, dict):
-                        for key, value in features.items():
-                            st.write(f"**{key}:** {value}")
-                    else:
-                        st.write(f"**色:** {getattr(features, 'color', '')}")
-                        st.write(f"**カット技法:** {getattr(features, 'cut_technique', '')}")
-                        st.write(f"**スタイリング:** {getattr(features, 'styling', '')}")
-                        st.write(f"**印象:** {getattr(features, 'impression', '')}")
-            
-            with col2:
-                st.write("#### スタイリスト情報")
-                
-                # スタイリスト情報
-                if isinstance(result, dict):
-                    stylist = result.get('selected_stylist', {})
-                    if isinstance(stylist, dict):
-                        stylist_name = stylist.get('name', '')
-                        specialties = stylist.get('specialties', '')
-                        description = stylist.get('description', '')
-                    else:
-                        stylist_name = getattr(stylist, 'name', '')
-                        specialties = getattr(stylist, 'specialties', '')
-                        description = getattr(stylist, 'description', '')
-                    
-                    # スタイリスト選択理由
-                    stylist_reason = result.get('stylist_reason', '')
-                else:
-                    stylist_name = getattr(result.selected_stylist, 'name', '')
-                    specialties = getattr(result.selected_stylist, 'specialties', '')
-                    description = getattr(result.selected_stylist, 'description', '')
-                    stylist_reason = getattr(result, 'stylist_reason', None)
-                
-                st.write(f"**スタイリスト名:** {stylist_name}")
-                st.write(f"**得意な技術・特徴:** {specialties}")
-                st.write(f"**説明文:** {description}")
-                
-                # 選択理由を表示
-                st.write("#### 選択理由")
-                st.write(stylist_reason or "選択理由は記録されていません")
-            
-            with col3:
-                st.write("#### クーポン情報")
-                
-                # クーポン情報
-                if isinstance(result, dict):
-                    coupon = result.get('selected_coupon', {})
-                    if isinstance(coupon, dict):
-                        coupon_name = coupon.get('name', '')
-                        price = coupon.get('price', 0)
-                        description = coupon.get('description', '')
-                    else:
-                        coupon_name = getattr(coupon, 'name', '')
-                        price = getattr(coupon, 'price', 0)
-                        description = getattr(coupon, 'description', '')
-                    
-                    # クーポン選択理由
-                    coupon_reason = result.get('coupon_reason', '')
-                else:
-                    coupon_name = getattr(result.selected_coupon, 'name', '')
-                    price = getattr(result.selected_coupon, 'price', 0)
-                    description = getattr(result.selected_coupon, 'description', '')
-                    coupon_reason = getattr(result, 'coupon_reason', None)
-                
-                st.write(f"**クーポン名:** {coupon_name}")
-                st.write(f"**価格:** {price}円")
-                st.write(f"**説明:** {description}")
-                
-                # 選択理由を表示
-                st.write("#### 選択理由")
-                st.write(coupon_reason or "選択理由は記録されていません")
-            
+    # エクスポートボタンの表示
+    display_export_buttons()
+
 
 async def fetch_salon_data(url, config_manager):
     """サロンデータの取得"""
@@ -677,8 +727,8 @@ async def fetch_salon_data(url, config_manager):
             stylists, coupons = await scraper.fetch_all_data(url)
             
             # 結果保存
-            st.session_state[SESSION_STYLISTS] = stylists
-            st.session_state[SESSION_COUPONS] = coupons
+            set_session_value(SESSION_STYLISTS, stylists)
+            set_session_value(SESSION_COUPONS, coupons)
             
             progress_bar.progress(1.0)
             st.success(f"スタイリスト{len(stylists)}名、クーポン{len(coupons)}件のデータを取得しました。")
@@ -699,13 +749,13 @@ def render_sidebar(config_manager):
         st.header("サロン設定")
         salon_url = st.text_input(
             "ホットペッパービューティURL",
-            value=st.session_state.get(SESSION_SALON_URL, config_manager.scraper.base_url),
+            value=get_session_value(SESSION_SALON_URL, config_manager.scraper.base_url),
             help="サロンのホットペッパービューティURLを入力してください。"
         )
         
         # URLをセッションに保存
         if salon_url:
-            st.session_state[SESSION_SALON_URL] = salon_url
+            set_session_value(SESSION_SALON_URL, salon_url)
         
         # サロンデータ取得ボタン
         if st.button("サロンデータを取得"):
@@ -717,9 +767,9 @@ def render_sidebar(config_manager):
                 asyncio.run(fetch_salon_data(salon_url, config_manager))
         
         # スタイリストとクーポン情報を表示
-        if SESSION_STYLISTS in st.session_state and SESSION_COUPONS in st.session_state:
-            stylists = st.session_state[SESSION_STYLISTS]
-            coupons = st.session_state[SESSION_COUPONS]
+        if has_session_key(SESSION_STYLISTS) and has_session_key(SESSION_COUPONS):
+            stylists = get_session_value(SESSION_STYLISTS)
+            coupons = get_session_value(SESSION_COUPONS)
             
             if stylists:
                 st.write(f"スタイリスト: {len(stylists)}人")
@@ -804,18 +854,18 @@ def render_sidebar(config_manager):
         # キャッシュ使用設定
         use_cache = st.checkbox(
             "キャッシュを使用する",
-            value=st.session_state.get(SESSION_USE_CACHE, True),
+            value=get_session_value(SESSION_USE_CACHE, True),
             help="オフにすると毎回APIリクエストを実行します。テスト時などに有用です。"
         )
         
         # キャッシュ使用設定をセッションに保存
-        st.session_state[SESSION_USE_CACHE] = use_cache
+        set_session_value(SESSION_USE_CACHE, use_cache)
         
         # プロセッサーがすでに存在する場合は設定を更新
-        if SESSION_PROCESSOR in st.session_state and st.session_state[SESSION_PROCESSOR] is not None:
-            processor = st.session_state[SESSION_PROCESSOR]
+        if has_session_key(SESSION_PROCESSOR) and get_session_value(SESSION_PROCESSOR) is not None:
+            processor = get_session_value(SESSION_PROCESSOR)
             processor.set_use_cache(use_cache)
-            st.session_state[SESSION_PROCESSOR] = processor
+            set_session_value(SESSION_PROCESSOR, processor)
         
 
 def convert_to_process_results(results):
@@ -906,30 +956,140 @@ def convert_to_process_results(results):
     
     return process_results
 
-def generate_excel_download(processor, results, title="タイトル生成が完了しました。"):
-    """プロセッサーを使用してExcelファイルを生成し、ダウンロードボタンを表示する関数"""
+def generate_excel_data(results):
+    """結果データからExcelバイナリデータを生成する"""
     try:
-        # プロセッサーの結果が既に設定されているか確認し、設定されていなければ追加
-        if not processor.results:
-            # 結果をProcessResultオブジェクトに変換してプロセッサーに追加
-            process_results = convert_to_process_results(results)
-            processor.results.extend(process_results)
+        # プロセッサーからエクセルエクスポーターを取得
+        processor = get_session_value(SESSION_PROCESSOR)
+        if not processor or not hasattr(processor, 'excel_exporter'):
+            logging.error("エクセルエクスポーターが初期化されていません。")
+            return None
         
-        # Excelバイナリデータを取得
-        excel_bytes = processor.get_excel_binary()
+        # 結果がある場合のみエクスポート
+        if not results or len(results) == 0:
+            logging.warning("結果が空のため、エクスポートできません。")
+            return None
         
-        # Excelファイルの生成
+        # エクセルデータを生成
+        excel_data = processor.excel_exporter.export(results)
+        if not excel_data:
+            logging.warning("エクセルデータの生成に失敗しました。")
+            return None
+        
+        return excel_data
+    except Exception as e:
+        logging.exception(f"エクセルエクスポート中にエラーが発生しました: {e}")
+        return None
+
+def generate_text_data(results):
+    """結果データからテキストデータを生成する"""
+    try:
+        # プロセッサーからテキストエクスポーターを取得
+        processor = get_session_value(SESSION_PROCESSOR)
+        if not processor or not hasattr(processor, 'text_exporter'):
+            st.error("テキストエクスポーターが初期化されていません。")
+            return None
+        
+        # 結果をProcessResultオブジェクトに変換
+        process_results = convert_to_process_results(results)
+        
+        # テキストデータを生成
+        text_data = processor.text_exporter.get_text_content(process_results)
+        
+        return text_data
+    except Exception as e:
+        logging.error(f"テキスト変換中にエラーが発生: {str(e)}")
+        import traceback
+        logging.error(traceback.format_exc())
+        st.error(f"テキスト生成エラー: {str(e)}")
+        return None
+
+def download_excel(excel_data):
+    """Excelファイルをダウンロードするボタンを表示する関数"""
+    if excel_data is None:
+        st.warning("ダウンロードするExcelデータがありません。")
+        return False
+    
+    try:
+        # ファイル名を生成
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"hairstyle_analysis_{timestamp}.xlsx"
         
-        # 通知メッセージを削除
+        # ダウンロードボタンを表示
+        st.download_button(
+            label="⬇️ Excelをダウンロード",
+            data=excel_data,
+            file_name=filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="クリックしてExcelファイルをダウンロード",
+        )
         
-        # 目立つスタイルでダウンロードボタンを表示
-        col1, col2, col3 = st.columns([1, 2, 1])
+        return True
+    except Exception as e:
+        logging.error(f"Excelダウンロード中にエラーが発生: {str(e)}")
+        import traceback
+        logging.error(traceback.format_exc())
+        st.error(f"Excelダウンロードエラー: {str(e)}")
+        return False
+
+def download_text(text_data):
+    """テキストファイルをダウンロードするボタンを表示する関数"""
+    if text_data is None:
+        st.warning("ダウンロードするテキストデータがありません。")
+        return False
+    
+    try:
+        # ファイル名を生成
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"hairstyle_analysis_{timestamp}.txt"
+        
+        # ダウンロードボタンを表示
+        st.download_button(
+            label="⬇️ テキストをダウンロード",
+            data=text_data,
+            file_name=filename,
+            mime="text/plain",
+            help="クリックしてテキストファイルをダウンロード",
+        )
+        
+        return True
+    except Exception as e:
+        logging.error(f"テキストダウンロード中にエラーが発生: {str(e)}")
+        import traceback
+        logging.error(traceback.format_exc())
+        st.error(f"テキストダウンロードエラー: {str(e)}")
+        return False
+
+def generate_excel_download(processor, results, title="タイトル生成が完了しました。"):
+    """プロセッサーを使用してExcelファイルを生成し、ダウンロードボタンを表示する関数"""
+    try:
+        # Excelデータを生成または取得
+        excel_data = None
+        
+        if processor and hasattr(processor, 'excel_exporter'):
+            # 結果をProcessResultオブジェクトに変換してプロセッサーに追加
+            process_results = convert_to_process_results(results)
+            
+            # 直接エクスポーターを使用してExcelデータを生成
+            excel_data = processor.excel_exporter.get_binary_data(process_results)
+        else:
+            # プロセッサーがない場合は警告を表示
+            st.warning("Excel出力のためのプロセッサーが利用できません。")
+            return False
+        
+        if not excel_data:
+            return False
+        
+        # Excel用ダウンロードボタンを表示
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"hairstyle_analysis_{timestamp}.xlsx"
+        
+        # 目立つスタイルでダウンロードボタンを表示（カラム数を2にする）
+        col1, col2 = st.columns([1, 2])
         with col2:
             st.download_button(
                 label="⬇️ Excelファイルをダウンロード ⬇️",
-                data=excel_bytes,
+                data=excel_data,
                 file_name=filename,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 help="クリックしてExcelファイルをダウンロード",
@@ -952,27 +1112,33 @@ def generate_excel_download(processor, results, title="タイトル生成が完�
 def generate_text_download(processor, results, title="タイトル生成が完了しました。"):
     """プロセッサーを使用してテキストファイルを生成し、ダウンロードボタンを表示する関数"""
     try:
-        # プロセッサーの結果が既に設定されているか確認し、設定されていなければ追加
-        if not processor.results:
+        # テキストデータを生成または取得
+        text_data = None
+        
+        if processor and hasattr(processor, 'text_exporter'):
             # 結果をProcessResultオブジェクトに変換してプロセッサーに追加
             process_results = convert_to_process_results(results)
-            processor.results.extend(process_results)
+            
+            # 直接エクスポーターを使用してテキストデータを生成
+            text_data = processor.text_exporter.get_text_content(process_results)
+        else:
+            # プロセッサーがない場合は警告を表示
+            st.warning("テキスト出力のためのプロセッサーが利用できません。")
+            return False
         
-        # テキストデータを取得
-        text_content = processor.get_text_content()
+        if not text_data:
+            return False
         
-        # テキストファイルの生成
+        # テキスト用ダウンロードボタンを表示
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"hairstyle_analysis_{timestamp}.txt"
         
-        # 通知メッセージを削除
-        
-        # 目立つスタイルでダウンロードボタンを表示
-        col1, col2, col3 = st.columns([1, 2, 1])
+        # 目立つスタイルでダウンロードボタンを表示（カラム数を2にする）
+        col1, col2 = st.columns([1, 2])
         with col2:
             st.download_button(
                 label="⬇️ テキストファイルをダウンロード ⬇️",
-                data=text_content,
+                data=text_data,
                 file_name=filename,
                 mime="text/plain",
                 help="クリックしてテキストファイルをダウンロード",
@@ -1037,7 +1203,7 @@ def render_main_content():
             # セッションからプロセッサーを取得または初期化
             try:
                 # プロセッサーが存在するか確認
-                if SESSION_PROCESSOR not in st.session_state or st.session_state[SESSION_PROCESSOR] is None:
+                if not has_session_key(SESSION_PROCESSOR) or get_session_value(SESSION_PROCESSOR) is None:
                     logging.info("プロセッサーがセッションに存在しないため、新規作成します")
                     config_manager = get_config_manager()
                     processor = create_processor(config_manager)
@@ -1048,10 +1214,10 @@ def render_main_content():
                         return
                     
                     # セッションに保存
-                    st.session_state[SESSION_PROCESSOR] = processor
+                    set_session_value(SESSION_PROCESSOR, processor)
                     logging.info("プロセッサーを初期化してセッションに保存しました")
                 else:
-                    processor = st.session_state[SESSION_PROCESSOR]
+                    processor = get_session_value(SESSION_PROCESSOR)
                     logging.info("セッションからプロセッサーを取得しました")
                 
                 # 一時ディレクトリに画像を保存
@@ -1093,15 +1259,15 @@ def render_main_content():
                     time_text = col2.empty()
                 
                 # 初期化
-                processor = st.session_state[SESSION_PROCESSOR]
+                processor = get_session_value(SESSION_PROCESSOR)
                 
                 # 非同期処理を実行
                 with st.spinner("画像を処理中..."):
                     # 進捗コールバック関数
                     def update_progress_callback(current, total, message=""):
                         # セッションから最新の進捗情報を取得
-                        if SESSION_PROGRESS in st.session_state:
-                            progress_data = st.session_state[SESSION_PROGRESS]
+                        if has_session_key(SESSION_PROGRESS):
+                            progress_data = get_session_value(SESSION_PROGRESS)
                             # 処理中の画像のインデックス
                             img_index = progress_data.get("current", 0)
                             # 総画像数
@@ -1169,8 +1335,8 @@ def render_main_content():
                                 time_text.markdown(time_info, unsafe_allow_html=True)
                     
                     # スタイリストとクーポンのデータを取得
-                    stylists = st.session_state.get(SESSION_STYLISTS, [])
-                    coupons = st.session_state.get(SESSION_COUPONS, [])
+                    stylists = get_session_value(SESSION_STYLISTS, [])
+                    coupons = get_session_value(SESSION_COUPONS, [])
                     
                     # スタイリストとクーポンのデータが存在するか確認
                     if not stylists:
@@ -1179,7 +1345,7 @@ def render_main_content():
                         st.warning("クーポン情報が取得されていません。サイドバーの「サロンデータを取得」ボタンを押してデータを取得してください。")
                     
                     # キャッシュ使用設定の取得
-                    use_cache = st.session_state.get(SESSION_USE_CACHE, True)
+                    use_cache = get_session_value(SESSION_USE_CACHE, True)
                     
                     # 処理の実行（スタイリストとクーポンのデータとキャッシュ設定を渡す）
                     # 進捗コールバック関数をセット
@@ -1191,9 +1357,9 @@ def render_main_content():
                     status_text.markdown("**処理完了**！🎉", unsafe_allow_html=True)
                     
                     # 処理詳細の表示
-                    if SESSION_PROGRESS in st.session_state and "stage_details" in st.session_state[SESSION_PROGRESS]:
+                    if has_session_key(SESSION_PROGRESS) and "stage_details" in get_session_value(SESSION_PROGRESS):
                         with progress_container.expander("処理の詳細を表示", expanded=False):
-                            st.write(st.session_state[SESSION_PROGRESS]["stage_details"])
+                            st.write(get_session_value(SESSION_PROGRESS)["stage_details"])
                     
                     # 結果が空でないか確認
                     if not results:
@@ -1201,7 +1367,7 @@ def render_main_content():
                         return
                     
                     # 結果をセッションに保存
-                    st.session_state[SESSION_RESULTS] = results
+                    set_session_value(SESSION_RESULTS, results)
                     
                     # 結果表示
                     display_results(results)
@@ -1209,7 +1375,7 @@ def render_main_content():
                     # ここから出力処理を追加
                     try:
                         # プロセッサーがセッションに存在することを確認
-                        processor = st.session_state[SESSION_PROCESSOR]
+                        processor = get_session_value(SESSION_PROCESSOR)
                         
                         # 出力前にプロセッサーの結果をクリアして、新しい結果をセット
                         processor.clear_results()
@@ -1241,15 +1407,15 @@ def render_main_content():
                 logging.error(traceback.format_exc())
     
     # 結果が既にセッションにある場合は表示
-    elif SESSION_RESULTS in st.session_state and st.session_state[SESSION_RESULTS]:
-        results = st.session_state[SESSION_RESULTS]
+    elif has_session_key(SESSION_RESULTS) and get_session_value(SESSION_RESULTS):
+        results = get_session_value(SESSION_RESULTS)
         display_results(results)
         
         # プロセッサーがセッションに存在するか確認
-        if SESSION_PROCESSOR in st.session_state and st.session_state[SESSION_PROCESSOR] is not None:
+        if has_session_key(SESSION_PROCESSOR) and get_session_value(SESSION_PROCESSOR) is not None:
             try:
                 # セッションからプロセッサーを取得
-                processor = st.session_state[SESSION_PROCESSOR]
+                processor = get_session_value(SESSION_PROCESSOR)
                 
                 # 出力前にプロセッサーの結果をクリアして、新しい結果をセット
                 processor.clear_results()
@@ -1278,12 +1444,12 @@ def render_main_content():
 def get_config_manager():
     """設定マネージャーのインスタンスを取得する"""
     # セッションから取得を試みる
-    if SESSION_CONFIG in st.session_state:
-        return st.session_state[SESSION_CONFIG]
+    if has_session_key(SESSION_CONFIG):
+        return get_session_value(SESSION_CONFIG)
     
     # セッションになければ新規作成
     config_manager = ConfigManager("config/config.yaml")
-    st.session_state[SESSION_CONFIG] = config_manager
+    set_session_value(SESSION_CONFIG, config_manager)
     return config_manager
 
 
@@ -1399,19 +1565,11 @@ def get_api_key():
         return None
 
 
-def run_streamlit_app(config_manager: ConfigManager, skip_page_config: bool = False):
-    """
-    Streamlitアプリケーションを実行する
-    
-    Args:
-        config_manager: 設定マネージャー
-        skip_page_config: Trueの場合、ページ設定（st.set_page_config）をスキップする
-    """
-    # セッションの初期化
-    init_session_state()
-    
-    # セッションに設定マネージャーを保存
-    st.session_state[SESSION_CONFIG] = config_manager
+def run_streamlit_app(config_manager=None, skip_page_config=False):
+    """Streamlitアプリケーションのメインエントリーポイント"""
+    # 設定マネージャーを初期化（必要な場合）
+    if config_manager is None:
+        config_manager = ConfigManager("config/config.yaml")
     
     # ページ設定（skip_page_configがFalseの場合のみ実行）
     if not skip_page_config:
@@ -1421,50 +1579,163 @@ def run_streamlit_app(config_manager: ConfigManager, skip_page_config: bool = Fa
             layout="wide",
         )
     
+    # 設定マネージャーをグローバル変数として保存
+    global _config_manager
+    _config_manager = config_manager
+    
+    # セッション状態の初期化
+    init_session_state()
+    
+    # メイン関数の呼び出し
+    main()
+
+def main():
+    """メインUI関数"""
     # サイドバーの表示
+    config_manager = get_config_manager()
     render_sidebar(config_manager)
     
-    # メインコンテンツ
-    render_main_content()
+    # アプリ状態のチェック
+    if not check_app_status():
+        return
     
-    # フッター
-    st.write("---")
-    st.write("© Cyber Accel-Advisors")
-
-
-if __name__ == "__main__":
-    # 設定マネージャーの初期化
-    config_manager = ConfigManager("config/config.yaml")
+    # ファイルアップロードエリア
+    uploaded_files = st.file_uploader(
+        "ヘアスタイル画像をアップロードしてください（複数可）",
+        type=["jpg", "jpeg", "png"],
+        accept_multiple_files=True
+    )
     
-    # アプリケーションの実行
-    run_streamlit_app(config_manager)
-
-# エラーハンドリング関数
-def display_error(e):
-    """エラーをログに記録し、ユーザーに表示する"""
-    error_message = f"エラーが発生しました: {str(e)}"
-    logging.error(error_message)
-    st.error(error_message)
-
-
-class StreamlitErrorHandler:
-    """Streamlit用のエラーハンドラークラス"""
-    def __init__(self):
-        self.error_occurred = False
-        self.error_message = ""
+    # セッションで保存した結果の読み込み
+    results = get_session_value(SESSION_RESULTS, None)
     
-    def __enter__(self):
-        self.error_occurred = False
-        self.error_message = ""
-        return self
+    # 処理ステージを管理（新しい処理の場合はリセット）
+    if uploaded_files and not get_session_value(SESSION_PROCESSING_STAGES, {}).get('processing_done', False):
+        set_session_value(SESSION_PROCESSING_STAGES, {
+            'processing_done': False,
+            'template_selection_done': False,
+            'results_display_done': False
+        })
     
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if exc_type:
-            self.error_occurred = True
-            self.error_message = str(exc_val)
-            logging.error(f"エラーが発生: {exc_type.__name__}: {exc_val}")
-            import traceback
-            logging.error(traceback.format_exc())
-            st.error(f"エラーが発生しました: {exc_val}")
-            return True  # 例外を処理済みとする
-        return False
+    # 処理ステージのチェック
+    processing_stages = get_session_value(SESSION_PROCESSING_STAGES, {})
+    
+    # ファイルがアップロードされていて、まだ処理されていない場合
+    if uploaded_files and not processing_stages.get('processing_done', False):
+        if st.button("画像を処理", type="primary"):
+            # 画像処理の実行
+            with st.spinner("画像を処理しています..."):
+                # 画像の一時保存
+                image_paths = handle_image_upload(uploaded_files)
+                
+                # プロセッサの取得または作成
+                processor = get_session_value(SESSION_PROCESSOR)
+                if processor is None:
+                    processor = create_processor(get_config_manager())
+                    set_session_value(SESSION_PROCESSOR, processor)
+                
+                # スタイリストとクーポン情報の取得
+                stylists = get_session_value(SESSION_STYLISTS, [])
+                coupons = get_session_value(SESSION_COUPONS, [])
+                
+                # キャッシュ使用設定の取得
+                use_cache = get_session_value(SESSION_USE_CACHE, True)
+                
+                # 進捗表示
+                display_progress()
+                
+                # 画像処理の実行
+                results = asyncio.run(process_images(processor, image_paths, stylists, coupons, use_cache))
+                
+                # 結果をセッションに保存
+                set_session_value(SESSION_RESULTS, results)
+                
+                # 処理ステージを更新
+                set_session_value(SESSION_PROCESSING_STAGES, {
+                    'processing_done': True,
+                    'template_selection_done': False,
+                    'results_display_done': False
+                })
+                
+                # 処理後に進捗を更新（完了表示）
+                if has_session_key(SESSION_PROGRESS):
+                    progress = get_session_value(SESSION_PROGRESS)
+                    progress["complete"] = True
+                    progress["message"] = "処理完了"
+                    set_session_value(SESSION_PROGRESS, progress)
+                
+                # ページのリロード
+                st.rerun()
+    
+    # テンプレート選択ステージ
+    elif results and processing_stages.get('processing_done', False) and not processing_stages.get('template_selection_done', False):
+        # テンプレート選択UI表示
+        display_template_choices(results)
+        
+        # 選択が確定されたかチェック
+        if get_session_value('confirm_template_selections', False):
+            # 処理ステージを更新
+            set_session_value(SESSION_PROCESSING_STAGES, {
+                'processing_done': True,
+                'template_selection_done': True,
+                'results_display_done': False
+            })
+            # フラグをリセット
+            set_session_value('confirm_template_selections', False)
+            # ページのリロード
+            st.rerun()
+    
+    # 結果表示ステージ
+    elif results and processing_stages.get('template_selection_done', True):
+        # 最終結果表示
+        display_results(results)
+        
+        # 処理ステージを更新
+        if not processing_stages.get('results_display_done', False):
+            set_session_value(SESSION_PROCESSING_STAGES, {
+                'processing_done': True,
+                'template_selection_done': True,
+                'results_display_done': True
+            })
+    
+    # 初期状態（まだ画像がアップロードされていない）
+    else:
+        # 初期メッセージ表示
+        if not uploaded_files:
+            st.info("画像ファイルをアップロードしてください。")
+        
+        # 前回の結果がある場合は表示
+        if results:
+            st.subheader("前回の処理結果")
+            display_results(results)
+
+def check_app_status():
+    """アプリケーションの状態を確認し、必要に応じて警告やエラーメッセージを表示する関数"""
+    # APIキーの確認
+    api_key = get_api_key()
+    if not api_key:
+        st.warning("Gemini APIキーが設定されていません。画像処理機能は動作しません。")
+        st.info("""
+        APIキーを設定するには:
+        1. .envファイルを作成し、`GEMINI_API_KEY=your_key_here`を追加する
+        2. または、Streamlit Secretsを使用する
+        """)
+        # APIキーがなくてもUIの表示は許可
+        return True
+    
+    # テンプレートファイルの確認
+    config_manager = get_config_manager()
+    if config_manager:
+        template_path = Path(config_manager.paths.template_csv)
+        if not template_path.exists():
+            st.warning(f"テンプレートファイルが見つかりません: {template_path}")
+            # テンプレートファイルがなくてもUIの表示は許可
+    
+    # サロンURLの確認
+    salon_url = get_session_value(SESSION_SALON_URL, "")
+    if not salon_url:
+        # 警告を表示するが、処理は続行
+        st.info("サイドバーからサロンURLを設定すると、スタイリストとクーポン情報を取得できます。")
+    
+    # アプリは正常に動作可能
+    return True

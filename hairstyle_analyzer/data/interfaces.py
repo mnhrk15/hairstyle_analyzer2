@@ -238,6 +238,8 @@ class ProcessResultProtocol(Protocol):
     style_analysis: StyleAnalysisProtocol
     attribute_analysis: AttributeAnalysisProtocol
     selected_template: TemplateProtocol
+    alternative_templates: List[TemplateProtocol]
+    user_selected_template: Optional[TemplateProtocol]
     selected_stylist: StylistInfoProtocol
     selected_coupon: CouponInfoProtocol
     processed_at: datetime

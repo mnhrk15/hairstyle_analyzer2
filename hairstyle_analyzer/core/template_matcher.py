@@ -190,9 +190,9 @@ class TemplateMatcher:
         analysis: Optional[StyleAnalysisProtocol] = None,
         use_category_filter: bool = True,
         max_templates: int = 50
-    ) -> Tuple[Optional[Template], Optional[str], bool]:
+    ) -> Tuple[Optional[Template], List[Template], Optional[str], bool]:
         """
-        Gemini AIを使って最適なテンプレートを選択します。
+        Gemini AIを使って最適なテンプレートとその代替候補を選択します。
         
         Args:
             image_path: 画像ファイルのパス
@@ -202,7 +202,7 @@ class TemplateMatcher:
             max_templates: AIに送信する最大テンプレート数
             
         Returns:
-            (選択されたテンプレート, 選択理由, 成功したかどうか)のタプル
+            (選択されたテンプレート, 代替テンプレートリスト, 選択理由, 成功したかどうか)のタプル
         """
         self.logger.info(f"AIによるテンプレートマッチング開始: 画像={image_path.name}")
         
@@ -231,7 +231,7 @@ class TemplateMatcher:
                     self.logger.warning(f"エラーによりデフォルトカテゴリを使用します: {selected_category}")
                 else:
                     self.logger.error("利用可能なカテゴリがありません")
-                    return None, "利用可能なカテゴリがありません", False
+                    return None, [], "利用可能なカテゴリがありません", False
         
         # 選択されたカテゴリのテンプレートを取得
         templates = self.template_manager.get_templates_by_category(selected_category)
@@ -245,32 +245,45 @@ class TemplateMatcher:
         
         if not templates:
             self.logger.error("テンプレートが見つかりません")
-            return None, "テンプレートが見つかりません", False
+            return None, [], "テンプレートが見つかりません", False
         
         # GeminiServiceを使用してテンプレート選択
         try:
-            template_id, reason = await gemini_service.select_best_template(
+            template_infos, success = await gemini_service.select_best_template(
                 image_path=image_path,
                 templates=templates,
                 analysis=analysis,
                 category_filter=use_category_filter
             )
             
-            selected_template = templates[template_id]
-            self.logger.info(f"AIがテンプレートを選択しました: {selected_template.title}")
-            return selected_template, reason, True
+            if not template_infos or len(template_infos) == 0:
+                self.logger.warning("テンプレート情報が空です")
+                return None, [], "テンプレート選択結果が空です", False
+                
+            # 主要なテンプレートと選択理由
+            primary_template_id, primary_reason = template_infos[0]
+            primary_template = templates[primary_template_id]
+            
+            # 代替テンプレート
+            alternative_templates = []
+            for template_id, _ in template_infos[1:]:
+                if 0 <= template_id < len(templates):
+                    alternative_templates.append(templates[template_id])
+            
+            self.logger.info(f"AIがテンプレートを選択しました: 主要={primary_template.title}, 代替={len(alternative_templates)}個")
+            return primary_template, alternative_templates, primary_reason, True
             
         except ValueError as e:
             # テンプレートリストが空など、値関連のエラー
             self.logger.error(f"値エラーが発生しました: {str(e)}")
-            return None, f"テンプレート選択エラー: {str(e)}", False
+            return None, [], f"テンプレート選択エラー: {str(e)}", False
             
         except GeminiAPIError as e:
             # GeminiAPI関連のエラー
             self.logger.error(f"GeminiAPIエラーが発生しました: {str(e)}")
-            return None, f"GeminiAPIエラー: {str(e)}", False
+            return None, [], f"GeminiAPIエラー: {str(e)}", False
             
         except Exception as e:
             # その他の予期しないエラー
             self.logger.error(f"AIによるテンプレート選択中に予期しないエラーが発生しました: {str(e)}")
-            return None, f"予期しないエラー: {str(e)}", False
+            return None, [], f"予期しないエラー: {str(e)}", False

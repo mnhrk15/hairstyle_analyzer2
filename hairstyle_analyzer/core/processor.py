@@ -154,7 +154,7 @@ class MainProcessor(MainProcessorProtocol):
             
             # 2. テンプレートマッチング
             self._update_progress(2, 5, f"テンプレートマッチング中: {image_path.name}")
-            template, template_reason = await self._match_template(image_path, style_analysis)
+            template, alternative_templates, template_reason = await self._match_template(image_path, style_analysis)
             
             if not template:
                 self.logger.error(f"テンプレートマッチングに失敗しました: {image_path.name}")
@@ -176,6 +176,7 @@ class MainProcessor(MainProcessorProtocol):
                 style_analysis=style_analysis,
                 attribute_analysis=attribute_analysis,
                 template=template,
+                alternative_templates=alternative_templates,
                 template_reason=template_reason,
                 stylist=selected_stylist,
                 stylist_reason=stylist_reason,
@@ -193,8 +194,17 @@ class MainProcessor(MainProcessorProtocol):
             self.logger.error(f"予期しないエラー: {str(e)}")
             return None
     
-    async def _match_template(self, image_path: Path, style_analysis: StyleAnalysisProtocol) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-        """テンプレートマッチングを実行"""
+    async def _match_template(self, image_path: Path, style_analysis: StyleAnalysisProtocol) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:
+        """
+        テンプレートマッチングを実行
+        
+        Args:
+            image_path: 画像ファイルのパス
+            style_analysis: スタイル分析結果
+            
+        Returns:
+            (選択されたテンプレート, 代替テンプレートリスト, 選択理由)のタプル
+        """
         # Gemini APIサービスを取得
         gemini_service = self.image_analyzer.gemini_service
         
@@ -205,12 +215,13 @@ class MainProcessor(MainProcessorProtocol):
         max_templates = gemini_service.config.template_matching.max_templates
         
         template = None
+        alternative_templates = []
         template_reason = None
         ai_matching_success = False
         
         if ai_matching_enabled:
             self.logger.info("AIベースのテンプレートマッチングを実行します")
-            template, template_reason, ai_matching_success = await self.template_matcher.find_best_template_with_ai(
+            template, alternative_templates, template_reason, ai_matching_success = await self.template_matcher.find_best_template_with_ai(
                 image_path=image_path,
                 gemini_service=gemini_service,
                 analysis=style_analysis,
@@ -223,8 +234,11 @@ class MainProcessor(MainProcessorProtocol):
             self.logger.info("従来のスコアリングベースのテンプレートマッチングを実行します")
             template = self.template_matcher.find_best_template(style_analysis)
             template_reason = "スコアリングベースのマッチングにより選択されました"
+            
+            # 代替テンプレートも取得
+            alternative_templates = self.template_matcher.find_alternative_templates(style_analysis, count=2)
         
-        return template, template_reason
+        return template, alternative_templates, template_reason
     
     async def _select_stylist(self, image_path: Path, stylists: List[StylistInfoProtocol], style_analysis: StyleAnalysisProtocol) -> Optional[Tuple[StylistInfoProtocol, str]]:
         """スタイリスト選択を実行"""
@@ -253,12 +267,30 @@ class MainProcessor(MainProcessorProtocol):
                               style_analysis: StyleAnalysisProtocol,
                               attribute_analysis: AttributeAnalysisProtocol,
                               template: Dict[str, Any],
+                              alternative_templates: List[Dict[str, Any]],
                               template_reason: str,
                               stylist: Optional[StylistInfoProtocol] = None,
                               stylist_reason: Optional[str] = None,
                               coupon: Optional[CouponInfoProtocol] = None,
                               coupon_reason: Optional[str] = None) -> ProcessResultProtocol:
-        """処理結果オブジェクトを作成"""
+        """
+        処理結果オブジェクトを作成
+        
+        Args:
+            image_path: 画像ファイルのパス
+            style_analysis: スタイル分析結果
+            attribute_analysis: 属性分析結果
+            template: 選択されたテンプレート
+            alternative_templates: 代替テンプレートのリスト
+            template_reason: テンプレート選択理由
+            stylist: 選択されたスタイリスト（オプション）
+            stylist_reason: スタイリスト選択理由（オプション）
+            coupon: 選択されたクーポン（オプション）
+            coupon_reason: クーポン選択理由（オプション）
+            
+        Returns:
+            処理結果オブジェクト
+        """
         from ..data.models import StyleAnalysis, StyleFeatures, AttributeAnalysis, Template, StylistInfo, CouponInfo
         
         # スタイル分析モデルの作成
@@ -282,51 +314,60 @@ class MainProcessor(MainProcessorProtocol):
         )
         
         # テンプレートモデルの作成
-        # テンプレートがすでにTemplateオブジェクトの場合とdict型の場合で処理を分ける
-        if isinstance(template, Template):
-            template_model = template
-        else:
-            # 辞書型の場合
-            template_model = Template(
-                category=template.get('category', ''),
-                title=template.get('title', ''),
-                menu=template.get('menu', ''),
-                comment=template.get('comment', ''),
-                hashtag=template.get('hashtag', '')
+        selected_template = Template(
+            category=template.category,
+            title=template.title,
+            menu=template.menu,
+            comment=template.comment,
+            hashtag=template.hashtag
+        )
+        
+        # 代替テンプレートモデルリストの作成
+        alternative_template_models = []
+        for alt_template in alternative_templates:
+            alt_template_model = Template(
+                category=alt_template.category,
+                title=alt_template.title,
+                menu=alt_template.menu,
+                comment=alt_template.comment,
+                hashtag=alt_template.hashtag
             )
+            alternative_template_models.append(alt_template_model)
         
         # スタイリストモデルの作成（存在する場合）
-        stylist_model = None
+        selected_stylist = None
         if stylist:
-            stylist_model = StylistInfo(
+            selected_stylist = StylistInfo(
                 name=stylist.name,
                 specialties=getattr(stylist, 'specialties', ''),
-                description=getattr(stylist, 'description', '')
+                description=stylist.description
             )
         
         # クーポンモデルの作成（存在する場合）
-        coupon_model = None
+        selected_coupon = None
         if coupon:
-            coupon_model = CouponInfo(
+            selected_coupon = CouponInfo(
                 name=coupon.name,
-                price=getattr(coupon, 'price', 0),
+                price=int(coupon.price) if hasattr(coupon, 'price') and coupon.price and str(coupon.price).isdigit() else 0,
                 description=getattr(coupon, 'description', ''),
                 categories=getattr(coupon, 'categories', []),
                 conditions=getattr(coupon, 'conditions', {})
             )
         
         # ProcessResultモデルの作成
+        from ..data.models import ProcessResult
         return ProcessResult(
             image_name=image_path.name,
             style_analysis=style_analysis_model,
             attribute_analysis=attribute_analysis_model,
-            selected_template=template_model,
-            selected_stylist=stylist_model,
-            selected_coupon=coupon_model,
+            selected_template=selected_template,
+            alternative_templates=alternative_template_models,
+            user_selected_template=None,  # ユーザー選択は初期状態ではNone
+            selected_stylist=selected_stylist,
+            selected_coupon=selected_coupon,
             stylist_reason=stylist_reason,
             coupon_reason=coupon_reason,
-            template_reason=template_reason,
-            processed_at=datetime.now()
+            template_reason=template_reason
         )
     
     async def process_images(self, image_paths: List[Path], use_cache: Optional[bool] = None) -> List[ProcessResultProtocol]:
@@ -496,7 +537,7 @@ class MainProcessor(MainProcessorProtocol):
                             continue
                         
                         # 2. テンプレートマッチング
-                        template = self.template_matcher.find_best_template(style_analysis)
+                        template, alternative_templates, template_reason = await self._match_template(image_path, style_analysis)
                         
                         if not template:
                             self.logger.error(f"テンプレートマッチングに失敗しました: {image_path.name}")

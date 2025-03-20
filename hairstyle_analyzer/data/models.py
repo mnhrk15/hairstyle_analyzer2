@@ -79,6 +79,8 @@ class ProcessResult(BaseModel):
     style_analysis: StyleAnalysis = Field(description="スタイル分析結果")
     attribute_analysis: AttributeAnalysis = Field(description="属性分析結果")
     selected_template: Template = Field(description="選択されたテンプレート")
+    alternative_templates: List[Template] = Field(default_factory=list, description="代替テンプレート選択肢")
+    user_selected_template: Optional[Template] = Field(default=None, description="ユーザーが選択したテンプレート")
     selected_stylist: StylistInfo = Field(description="選択されたスタイリスト")
     selected_coupon: CouponInfo = Field(description="選択されたクーポン")
     stylist_reason: Optional[str] = Field(default=None, description="スタイリスト選択理由")
