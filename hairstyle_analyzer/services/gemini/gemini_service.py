@@ -920,9 +920,9 @@ class GeminiService:
         templates: List[Template],
         analysis: Optional[StyleAnalysisProtocol] = None,
         category_filter: bool = False
-    ) -> Tuple[int, str]:
+    ) -> Tuple[List[Tuple[int, str]], bool]:
         """
-        画像と分析結果に基づいて最適なテンプレートをAIが選択します。
+        画像と分析結果に基づいて最適なテンプレート複数をAIが選択します。
         
         Args:
             image_path: 画像ファイルのパス
@@ -931,7 +931,8 @@ class GeminiService:
             category_filter: カテゴリでフィルタリングするかどうか
             
         Returns:
-            (選択されたテンプレートのインデックス, 選択理由)のタプル
+            (選択されたテンプレート情報のリスト, 成功したかどうか)のタプル
+            テンプレート情報は (テンプレートインデックス, 選択理由) のタプル形式
             
         Raises:
             GeminiAPIError: API呼び出しに失敗した場合
@@ -962,7 +963,7 @@ class GeminiService:
         
         # プロンプトの改善
         improved_prompt = f"""
-あなたはヘアスタイルの専門家です。この画像のヘアスタイルに最適なテンプレートを選択してください。
+あなたはヘアスタイルの専門家です。この画像のヘアスタイルに最適なテンプレートを3つ選択してください。
 
 【画像分析結果】
 {analysis_info}
@@ -975,10 +976,22 @@ class GeminiService:
 2. 雰囲気やイメージが画像と一致するもの
 3. ターゲット層（性別・年齢）が合っているもの
 
-必ず以下のJSON形式で回答してください：
+必ず以下のJSON形式で、優先度の高い順に3つのテンプレートを回答してください：
 {{
-  "template_id": 選択したテンプレート番号（0から{len(templates)-1}までの整数）,
-  "reason": "このテンプレートを選んだ詳細な理由の説明（カットスタイル、髪色、全体的な印象などの観点から）"
+  "templates": [
+    {{
+      "template_id": 1番目のテンプレート番号（0から{len(templates)-1}までの整数）,
+      "reason": "このテンプレートを選んだ詳細な理由の説明（カットスタイル、髪色、全体的な印象などの観点から）"
+    }},
+    {{
+      "template_id": 2番目のテンプレート番号（0から{len(templates)-1}までの整数）,
+      "reason": "このテンプレートを選んだ詳細な理由の説明"
+    }},
+    {{
+      "template_id": 3番目のテンプレート番号（0から{len(templates)-1}までの整数）,
+      "reason": "このテンプレートを選んだ詳細な理由の説明"
+    }}
+  ]
 }}
 """
         
@@ -988,34 +1001,24 @@ class GeminiService:
         # JSONレスポンスの解析
         result = self._parse_json_response(response_text)
         
-        if not result or "template_id" not in result:
+        if not result or "templates" not in result:
             error_msg = "AIからの応答が無効でした"
             self.logger.warning(f"テンプレート選択の応答が無効です: {response_text}")
             raise GeminiAPIError(error_msg, error_type="INVALID_RESPONSE", details={"response": response_text})
         
-        template_id = result.get("template_id")
-        reason = result.get("reason", "理由は提供されませんでした")
+        templates_info = result["templates"]
         
-        # テンプレートIDの検証
-        if not isinstance(template_id, int) or template_id < 0 or template_id >= len(templates):
-            self.logger.warning(f"無効なテンプレートID: {template_id}, 範囲外です")
-            
-            # 数値に変換を試みる
-            if isinstance(template_id, str) and template_id.isdigit():
-                template_id = int(template_id)
-                if 0 <= template_id < len(templates):
-                    self.logger.info(f"文字列から数値に変換しました: {template_id}")
-                    return template_id, reason
-            
-            # それでも無効な場合は例外を発生
+        # テンプレート情報の検証
+        if not isinstance(templates_info, list) or len(templates_info) != 3 or not all(isinstance(i, dict) and "template_id" in i and "reason" in i for i in templates_info):
+            self.logger.warning(f"無効なテンプレート情報: {templates_info}")
             raise GeminiAPIError(
-                f"無効なテンプレートID: {template_id} (範囲: 0-{len(templates)-1})",
-                error_type="INVALID_TEMPLATE_ID",
-                details={"template_id": template_id, "valid_range": f"0-{len(templates)-1}"}
+                f"無効なテンプレート情報: {templates_info}",
+                error_type="INVALID_TEMPLATE_INFO",
+                details={"templates_info": templates_info}
             )
         
-        self.logger.info(f"AIがテンプレートを選択しました: ID={template_id}")
-        return template_id, reason
+        self.logger.info(f"AIがテンプレートを選択しました: {templates_info}")
+        return [(i["template_id"], i["reason"]) for i in templates_info], True
     
     def _format_templates_for_matching(self, templates: List[Template]) -> str:
         """
